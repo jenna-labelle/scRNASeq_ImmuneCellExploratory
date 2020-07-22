@@ -9,23 +9,31 @@ Data from
 
 Import packages
 ```{r}
-library("org.Hs.eg.db") 
+library(org.Hs.eg.db) 
+library(Seurat)
+library(scRNAseq)
+library(dplyr) 
+```
+
+Functions
+```{r}
+#From list of marker hits (from Seurat) + list of known markers of immune genes, identify top 3 most likely cell types for a cluster
+IdentifyLikelyCell<-function(immuneCells, cluster){
+  cluster_cells<- immuneCells[rownames(immuneCells) %in% rownames(cluster),]
+  CellMarkerCounts<- data.frame(table(cluster_cells$MaxCell))
+  CellMarkerCounts<- CellMarkerCounts[order(CellMarkerCounts$Freq,decreasing=TRUE),]
+  return(CellMarkerCounts[1:3,])
+}
 ```
 
 #Read in data, set up seurat object
 ```{r}
-#Read in data
-wd<- "C:/Users/jenna/OneDrive/Desktop/Seurat/"
-dataInput<-read.table(file=paste(wd, "immune_control_expression_matrix.txt.gz",sep=""))
-data<-dataInput[1:10000,]
+#Read in data- using bioconductor package "scRNASeq" for retrieving publically available scRNASeq datasets
+wd<- "C:/Users/jjl71/OneDrive/Jenna/OneDrive/Desktop/Seurat/"
 
-#Convert to integer, if necessary
-data_int<-apply(dataInput[,-1], 2, as.integer)
-data<-as.data.frame(data_int)
-rownames(data)<-dataInput$V1
-data<-cbind(data, data)
-data<-cbind(data, data)
-colnames(data)<- paste("V", 1:ncol(data), sep ="")
+dataInput<-BaronPancreasData('human')
+data<-as.data.frame(counts(dataInput))
+
 
 #Set up seurat object
 sdata<-CreateSeuratObject(counts=data, project="SC", min.cells=30)
@@ -174,6 +182,43 @@ sdata.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
 ```
 
 
+#Attempt to classify clusters by overlap between their markers/markers of common immune cells
+
+```{r}
+#Read in cluster markers, previously analyzed and exported
+sdata.markers<-read.csv(paste(wd, "AllMarkers.csv", sep="" ), row.names="X")
+
+#Select only significant (adjusted p value) genes
+markers.sig<- sdata.markers[sdata.markers$p_val_adj<=0.05,]
+
+#Split into separate dfs for each cluster
+markerList<- split(markers.sig, f= markers.sig$cluster )
+
+#Read in df of immune cell markers. Convert to gene symbol, remove any NAs or duplicates
+immuneCells<-read.csv(paste(wd, "mean_tpm_merged.csv", sep=""),stringsAsFactors = FALSE)
+immuneCells$GeneSymbol <- mapIds(org.Hs.eg.db, keys = immuneCells$gene, keytype ="ENSEMBL", column="SYMBOL")
+immuneCells<-na.omit(immuneCells)
+immuneCells<-immuneCells[!(duplicated(immuneCells$GeneSymbol)),]
+rownames(immuneCells)<-immuneCells$GeneSymbol
+immuneCells<- immuneCells[,!(colnames(immuneCells) %in% c("gene", "GeneSymbol"))]
+
+#Create df of "unique" markers: for each gene, only consider it a marker for the gene it's expressed highest in
+uniqueMarkers<- as.data.frame(t(immuneCells))
+uniqueMax<- apply(immuneCells, 1, which.max)
+immuneCells$MaxCell<-colnames(immuneCells)[max.col(immuneCells)]
+
+#Identify top 3 most likely cell types for each cluster
+topCells<- lapply(markerList, IdentifyLikelyCell, immuneCells=immuneCells)
+
+alltopCells<-topCells %>%  Reduce(function(dtf1,dtf2) full_join(dtf1,dtf2,by="Var1"), .)
+
+#Manually look through top cells, assign each a most likely group. May be overlaps.
+ClusterClassifications<- c("T.cell..CD8..naive..activated", "T.cell..CD4..naive..activated", "X","Monocyte..classical",
+                           "NK.cell..CD56dim.CD16","Monocyte..non.classical", "X", "B.cell..naive",
+                           "NK.cell..CD56dim.CD16","X", "X", "X",
+                           "X", "Monocyte..non.classical" )
+```
+
 #Rename clusters based on markers- if known
 ```{r}
 new.cluster.ids <- c("Cell type 1", "Cell type 2")
@@ -181,4 +226,3 @@ names(new.cluster.ids) <- levels(sdata)
 sdata <- RenameIdents(sdata, new.cluster.ids)
 DimPlot(sdata, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 ```
-
